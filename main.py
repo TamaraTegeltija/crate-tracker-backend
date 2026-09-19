@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, Query
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
@@ -215,86 +215,66 @@ def create_scan(
         "ble_nodes_saved": len(nodes)
     }
 # ============================================================
-# GET ALL SCANS
+# GET SCANS (LIMITED AND BATCH LOADED)
 # ============================================================
 
 @app.get("/api/scans")
 def get_scans(
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0)
 ):
-
-    # Uzimamo sve scanove iz baze.
-    # Najnoviji ide prvi.
+    # Najnoviji skenovi prvi; preuzimamo samo trazenu stranicu.
     scans = (
         db.query(models.Scan)
         .order_by(models.Scan.timestamp.desc())
+        .offset(offset)
+        .limit(limit)
         .all()
     )
 
+    if not scans:
+        return []
+
+    scan_ids = [scan.message_id for scan in scans]
+
+    # Umesto po dva dodatna upita za SVAKI sken, preuzimamo
+    # pripadajuce Wi-Fi mreze i BLE cvorove u po jednom upitu.
+    wifi_networks = (
+        db.query(models.WifiNetwork)
+        .filter(models.WifiNetwork.scan_message_id.in_(scan_ids))
+        .all()
+    )
+    ble_nodes = (
+        db.query(models.BleNode)
+        .filter(models.BleNode.scan_message_id.in_(scan_ids))
+        .all()
+    )
+
+    wifi_by_scan = {scan_id: [] for scan_id in scan_ids}
+    for wifi in wifi_networks:
+        wifi_by_scan[wifi.scan_message_id].append(
+            {
+                "ssid": wifi.ssid,
+                "bssid": wifi.bssid,
+                "rssi": wifi.rssi,
+                "channel": wifi.channel
+            }
+        )
+
+    ble_by_scan = {scan_id: [] for scan_id in scan_ids}
+    for node in ble_nodes:
+        ble_by_scan[node.scan_message_id].append(
+            {
+                "id": node.mac,
+                "rssi": node.rssi,
+                "data": node.data,
+                "timestamp": node.timestamp
+            }
+        )
+
     result = []
-
     for scan in scans:
-
-        # ----------------------------------------------------
-        # WIFI MREZE KOJE PRIPADAJU OVOM SCAN-U
-        # ----------------------------------------------------
-
-        wifi_networks = (
-            db.query(models.WifiNetwork)
-            .filter(
-                models.WifiNetwork.scan_message_id
-                == scan.message_id
-            )
-            .all()
-        )
-
-
-        wifi_result = []
-
-        for wifi in wifi_networks:
-
-            wifi_result.append(
-                {
-                    "ssid": wifi.ssid,
-                    "bssid": wifi.bssid,
-                    "rssi": wifi.rssi,
-                    "channel": wifi.channel
-                }
-            )
-
-
-        # ----------------------------------------------------
-        # BLE NODOVI KOJI PRIPADAJU OVOM SCAN-U
-        # ----------------------------------------------------
-
-        ble_nodes = (
-            db.query(models.BleNode)
-            .filter(
-                models.BleNode.scan_message_id
-                == scan.message_id
-            )
-            .all()
-        )
-
-
-        ble_result = []
-
-        for node in ble_nodes:
-
-            ble_result.append(
-                {
-                    "id": node.mac,
-                    "rssi": node.rssi,
-                    "data": node.data,
-                    "timestamp": node.timestamp
-                }
-            )
-
-
-        # ----------------------------------------------------
-        # CEO SCAN
-        # ----------------------------------------------------
-
         result.append(
             {
                 "message_id": scan.message_id,
@@ -304,11 +284,9 @@ def get_scans(
                 "timestamp": scan.timestamp,
                 "temperature": scan.temperature,
                 "humidity": scan.humidity,
-
-                "wifi": wifi_result,
-                "ble_nodes": ble_result
+                "wifi": wifi_by_scan[scan.message_id],
+                "ble_nodes": ble_by_scan[scan.message_id]
             }
         )
-
 
     return result
